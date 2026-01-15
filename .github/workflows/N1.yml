@@ -6,7 +6,7 @@ on:
     branches:
       - readme
     paths:
-      - .github/workflows/ci.yml
+      - .github/workflows/N1.yml
 
 env:
   SCRIPT_REPO: ${{ github.repository }}
@@ -122,15 +122,9 @@ jobs:
           body_path: Body.md
 
   build-debs:
-    name: Build ${{ matrix.BRANCH }}
+    name: Build current
     needs: prepare
     runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        BRANCH:
-          - current
-
     steps:
       - name: Import env
         run: |
@@ -146,7 +140,6 @@ jobs:
         if: ${{ env.PATCHES }}
         run: |
           echo "::group::Download"
-          # 修复BUG1: 循环下载多个逗号分隔的补丁ID，原版语法错误修复
           echo "${PATCHES}" | tr ',' '\n' | while read -r patch_id; do
             [[ -n "${patch_id}" ]] && curl -fsSL -O "https://github.com/armbian/build/pull/${patch_id}.patch"
           done
@@ -160,13 +153,12 @@ jobs:
 
       - name: Build
         run: |
-          # Don't update remote cache
           export GITHUB_ACTIONS=false
           sudo --preserve-env \
             ./compile.sh kernel \
               ALLOW_ROOT=yes \
               BOARD=onecloud \
-              BRANCH=${{ matrix.BRANCH }} \
+              BRANCH=current \
               EXPERT=yes \
               USE_CCACHE=no
           sudo chown $(id -u):$(id -g) -R output/
@@ -174,7 +166,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: debs-${{ matrix.BRANCH }}
+          name: debs-current
           path: output/debs/*
 
       - name: Upload to release
@@ -185,31 +177,10 @@ jobs:
             output/debs/*
 
   build:
-    name: Build ${{ matrix.RELEASE }}-${{ matrix.BRANCH }}-${{ matrix.TYPE == 'desktop' && matrix.DESKTOP_ENVIRONMENT || matrix.TYPE }}
+    name: Build Bookworm-cli (唯一刷机镜像)
     needs: [ prepare, build-debs ]
     runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        BRANCH:
-          - current
-        RELEASE:
-          - noble
-          - oracular
-          - plucky
-          - bookworm
-          - trixie
-          - sid
-        TYPE:
-          - minimal
-          - cli
-          - desktop
-        include:
-          - TYPE: desktop
-            DESKTOP_ENVIRONMENT: xfce
-            DESKTOP_ENVIRONMENT_CONFIG_NAME: config_base
-            DESKTOP_APPGROUPS_SELECTED: ""
-
+    # ✅ 核心修改1：彻底删除所有matrix矩阵，无多版本编译
     steps:
       - name: Import env
         run: |
@@ -225,7 +196,6 @@ jobs:
         if: ${{ env.PATCHES }}
         run: |
           echo "::group::Download"
-          # 修复BUG1: 循环下载多个逗号分隔的补丁ID，原版语法错误修复
           echo "${PATCHES}" | tr ',' '\n' | while read -r patch_id; do
             [[ -n "${patch_id}" ]] && curl -fsSL -O "https://github.com/armbian/build/pull/${patch_id}.patch"
           done
@@ -240,25 +210,21 @@ jobs:
       - name: Download debs
         uses: actions/download-artifact@v4
         with:
-          name: debs-${{ matrix.BRANCH }}
+          name: debs-current
           path: output/debs/
 
       - name: Build
         run: |
-          # Don't update remote cache
           export GITHUB_ACTIONS=false
           sudo --preserve-env \
             ./compile.sh build \
               ALLOW_ROOT=yes \
               BOARD=onecloud \
-              BRANCH=${{ matrix.BRANCH }} \
-              RELEASE=${{ matrix.RELEASE }} \
+              BRANCH=current \
+              RELEASE=bookworm \ # ✅ 核心修改2：只编译Debian12 Bookworm 稳定版
               KERNEL_CONFIGURE=no \
-              BUILD_MINIMAL=${{ matrix.TYPE == 'minimal' && 'yes' || 'no' }} \
-              BUILD_DESKTOP=${{ matrix.TYPE == 'desktop' && 'yes' || 'no' }} \
-              DESKTOP_ENVIRONMENT=${{ matrix.DESKTOP_ENVIRONMENT }} \
-              DESKTOP_ENVIRONMENT_CONFIG_NAME=${{ matrix.DESKTOP_ENVIRONMENT_CONFIG_NAME }} \
-              DESKTOP_APPGROUPS_SELECTED=${{ matrix.DESKTOP_APPGROUPS_SELECTED }} \
+              BUILD_MINIMAL=no \
+              BUILD_DESKTOP=no \ # ✅ 核心修改3：只编译CLI版本，完美适配打印/扫描/机顶盒
               EXPERT=yes \
               SKIP_EXTERNAL_TOOLCHAINS=yes \
               CLEAN_LEVEL= \
@@ -269,9 +235,7 @@ jobs:
       - name: Install Dependents
         run: |
           sudo apt install -y img2simg
-
           ver="v0.3.1"
-          # 优化: 存在性判断，避免重复下载
           if [[ ! -f ./AmlImg ]]; then
             curl -fsSL -o ./AmlImg https://github.com/hzyitc/AmlImg/releases/download/$ver/AmlImg_${ver}_linux_amd64
             chmod +x ./AmlImg
@@ -282,7 +246,6 @@ jobs:
           echo "::group::Download"
           curl -fsSL -o ./uboot.img https://github.com/${UBOOT_REPO}/releases/download/${UBOOT_TAG}/${UBOOT_BURNIMG}
           echo "::endgroup::"
-
           echo "::group::Unpack"
           ./AmlImg unpack ./uboot.img burn/
           echo "::endgroup::"
@@ -300,22 +263,20 @@ jobs:
         run: |
           echo -n "sha1sum $(sha1sum burn/boot.simg | awk '{print $1}')" >burn/boot.VERIFY
           echo -n "sha1sum $(sha1sum burn/rootfs.simg | awk '{print $1}')" >burn/rootfs.VERIFY
-
           cat <<EOF >>burn/commands.txt
           PARTITION:boot:sparse:boot.simg
           VERIFY:boot:normal:boot.VERIFY
           PARTITION:rootfs:sparse:rootfs.simg
           VERIFY:rootfs:normal:rootfs.VERIFY
           EOF
-
           prefix=$(ls output/images/*.img | sed 's/\.img$//')
           burnimg=${prefix}.burn.img
           ./AmlImg pack $burnimg burn/
 
       - name: Hash and compress images
         run: |
-          # 修复BUG2: 先压缩，再对最终的xz压缩包做sha256校验，保证校验值准确
-          for f in output/images/*.img; do
+          # ✅ 只对最终刷机包压缩+校验，无多余文件
+          for f in output/images/*.burn.img; do
             xz --threads=0 --compress "$f"
             sha256sum "${f}.xz" | tee -a sha256sum
           done
@@ -323,8 +284,8 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.RELEASE }}-${{ matrix.BRANCH }}-${{ matrix.TYPE == 'desktop' && matrix.DESKTOP_ENVIRONMENT || matrix.TYPE }}
-          path: output/images/*
+          name: onecloud-flash-image
+          path: output/images/*.burn.img.xz
 
       - name: Generate release informations
         run: |
@@ -339,4 +300,4 @@ jobs:
           append_body: true
           body_path: Release.md
           files: |
-            output/images/*
+            output/images/*.burn.img.xz
