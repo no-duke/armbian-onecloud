@@ -1,4 +1,4 @@
-name: OneCloud 刷机镜像编译 # 改回玩客云对应名称
+name: OneCloud
 on:
   workflow_dispatch:
   push:
@@ -156,7 +156,7 @@ jobs:
           sudo --preserve-env \
             ./compile.sh kernel \
               ALLOW_ROOT=yes \
-              BOARD=onecloud \ # 玩客云硬件适配
+              BOARD=onecloud \
               BRANCH=current \
               EXPERT=yes \
               USE_CCACHE=no
